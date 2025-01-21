@@ -1,7 +1,6 @@
 const { getTables } = require('./getTables');
 const cliProgress = require('cli-progress');
 
-// Definição dos valores válidos para cada enum
 const ENUM_VALUES = {
   UserRole: ['ADMIN', 'GUEST', 'MANAGER', 'EDITOR'],
   DocumentType: ['MODELO', 'FORMULARIO', 'GUIA', 'MANUAL', 'FILE'],
@@ -26,20 +25,14 @@ async function getTableSchema(prisma, table) {
   return await prisma.$queryRawUnsafe(query, table);
 }
 
-function getDefaultValueForEnum(enumType) {
-  if (!ENUM_VALUES[enumType]) return null;
-  return ENUM_VALUES[enumType][0];
-}
-
 function validateAndFixEnumValue(value, enumType) {
   if (!ENUM_VALUES[enumType]) return value;
   if (ENUM_VALUES[enumType].includes(value)) return value;
-  console.warn(`Valor inválido para enum ${enumType}: ${value}. Usando valor padrão: ${ENUM_VALUES[enumType][0]}`);
   return ENUM_VALUES[enumType][0];
 }
 
 function getCurrentTimestamp() {
-  return new Date().toISOString();
+  return new Date();
 }
 
 async function copyData(prismaSource, prismaDestination) {
@@ -62,35 +55,29 @@ async function copyData(prismaSource, prismaDestination) {
         for (let index = 0; index < data.length; index++) {
           const row = data[index];
           const normalizedRow = {};
+          const columnTypes = {};
 
-          // Verificar se a tabela tem campos de timestamp
-          const hasUpdatedAt = tableSchema.some(col => col.column_name === 'updatedAt');
-          const hasCreatedAt = tableSchema.some(col => col.column_name === 'createdAt');
           const currentTimestamp = getCurrentTimestamp();
 
           for (const column of tableSchema) {
             const columnName = column.column_name;
             let value = row[columnName];
+            columnTypes[columnName] = column.data_type;
 
-            // Tratamento especial para updatedAt
-            if (columnName === 'updatedAt' && (value === null || value === undefined)) {
-              value = currentTimestamp;
-              console.log(`Definindo updatedAt para data atual em registro da tabela ${table}`);
+            // Tratamento especial para timestamps
+            if (column.data_type.includes('timestamp')) {
+              if (value === null || value === undefined) {
+                value = currentTimestamp;
+              } else if (typeof value === 'string') {
+                value = new Date(value);
+              }
             }
             
-            // Tratamento especial para createdAt
-            if (columnName === 'createdAt' && (value === null || value === undefined)) {
-              value = currentTimestamp;
-            }
-
             // Tratamento para ENUMs
-            if (column.data_type === 'USER-DEFINED') {
+            else if (column.data_type === 'USER-DEFINED') {
               const enumType = column.udt_name;
               if (ENUM_VALUES[enumType]) {
                 value = validateAndFixEnumValue(value, enumType);
-                if (column.is_nullable === 'NO' && value === null) {
-                  value = getDefaultValueForEnum(enumType);
-                }
               }
             }
             // Tratamento para arrays
@@ -111,33 +98,22 @@ async function copyData(prismaSource, prismaDestination) {
                 case 'boolean':
                   value = false;
                   break;
-                case 'timestamp with time zone':
-                case 'timestamp without time zone':
-                  value = currentTimestamp;
-                  break;
               }
             }
 
             normalizedRow[columnName] = value;
           }
 
-          // Garantir que updatedAt tenha um valor se existir na tabela
-          if (hasUpdatedAt && !normalizedRow.updatedAt) {
-            normalizedRow.updatedAt = currentTimestamp;
-          }
-
-          // Garantir que createdAt tenha um valor se existir na tabela
-          if (hasCreatedAt && !normalizedRow.createdAt) {
-            normalizedRow.createdAt = currentTimestamp;
-          }
-
           const normalizedKeys = Object.keys(normalizedRow);
           const normalizedValues = Object.values(normalizedRow);
 
+          // Construir placeholders com os casts apropriados
           const placeholders = normalizedKeys.map((key, i) => {
-            const column = tableSchema.find(col => col.column_name === key);
-            if (column && column.data_type === 'USER-DEFINED') {
-              return `$${i + 1}::${column.udt_name}`;
+            const columnType = columnTypes[key];
+            if (columnType.includes('timestamp')) {
+              return `$${i + 1}::timestamp`;
+            } else if (columnType === 'USER-DEFINED') {
+              return `$${i + 1}::${tableSchema.find(col => col.column_name === key).udt_name}`;
             }
             return `$${i + 1}`;
           }).join(', ');
