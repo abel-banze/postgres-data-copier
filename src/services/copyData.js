@@ -35,16 +35,20 @@ async function copyData(prismaSource, prismaDestination) {
 
         // Preparar chaves e valores para a inserção
         const normalizedKeys = Object.keys(normalizedRow);
+
+        console.log(`inserindo ${normalizedKeys} na tabela ${table}`)
         const normalizedValues = Object.values(normalizedRow);
 
         // Criação da query com `ON CONFLICT`
         const placeholders = normalizedKeys.map((_, i) => `$${i + 1}`).join(', ');
         const conflictKeys = normalizedKeys.includes('id') ? 'id' : normalizedKeys[0]; // Assume que a chave primária seja `id`
+        
         const insertQuery = `
-          INSERT INTO "${table}" (${normalizedKeys.join(', ')})
+          INSERT INTO "${table}" (${normalizedKeys.map(key => `"${key}"`).join(', ')})
           VALUES (${placeholders})
-          ON CONFLICT (${conflictKeys}) DO NOTHING
+          ON CONFLICT ("${conflictKeys}") DO NOTHING
         `;
+
 
         try {
           await prismaDestination.$executeRawUnsafe(insertQuery, ...normalizedValues);

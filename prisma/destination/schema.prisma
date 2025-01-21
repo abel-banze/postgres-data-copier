@@ -9,8 +9,158 @@ datasource db {
 }
 
 
+
+model Account {
+  id                String   @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String?  @db.Text
+  access_token      String?  @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String?  @db.Text
+  session_state     String?
+  user              User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@index([userId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
 model User {
-  id    Int     @id @default(autoincrement())
-  email String  @unique
-  name  String?
+  id            String      @id @default(cuid())
+  username      String?     @unique
+  firstName     String?
+  lastName      String?
+  email         String      @unique
+  role          UserRole    @default(GUEST)
+  password      String
+  cargo         String?
+  avatar        String?
+  startedAt     DateTime?
+  birthday      DateTime?
+  status        Boolean     @default(true)
+  accounts      Account[]
+  sessions      Session[]
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+  news          News[]
+  events        Event[]
+}
+
+
+enum UserRole {
+  ADMIN
+  GUEST
+  MANAGER
+  EDITOR
+}
+
+model App {
+  id        String   @id @default(cuid())
+  name      String
+  url       String
+  logo      String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Document {
+  id          String       @id @default(cuid())
+  name        String
+  description String?
+  url         String
+  tags        String[]
+  type        DocumentType
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+}
+
+enum DocumentType {
+  MODELO
+  FORMULARIO
+  GUIA
+  MANUAL
+  FILE
+}
+
+model News {
+  id          String   @id @default(cuid())
+  title       String
+  content     String   @db.Text
+  summary     String?
+  coverImage  String?
+  tags        String[]
+  author      User     @relation(fields: [authorId], references: [id])
+  authorId    String
+  category    NewsCategory
+  status      NewsStatus   @default(DRAFT)
+  publishedAt DateTime?    @default(now())
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  @@index([authorId])
+  @@index([category])
+}
+
+model Event {
+  id          String       @id @default(cuid())
+  title       String
+  description String?      @db.Text
+  startDate   DateTime
+  endDate     DateTime?
+  location    String?
+  coverImage  String?
+  tags        String[]
+  organizer   User         @relation(fields: [organizerId], references: [id])
+  organizerId String
+  type        EventType
+  status      EventStatus  @default(DRAFT)
+  registrationDeadline DateTime?
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+
+  @@index([organizerId])
+  @@index([type])
+}
+
+enum NewsCategory {
+  COMPANY
+  INDUSTRY
+  TECHNOLOGY
+  GENERAL
+  ANNOUNCEMENT
+}
+
+enum NewsStatus {
+  DRAFT
+  PUBLISHED
+  ARCHIVED
+}
+
+enum EventType {
+  CONFERENCE
+  WORKSHOP
+  WEBINAR
+  MEETING
+  SOCIAL
+  TRAINING
+  OTHER
+}
+
+enum EventStatus {
+  DRAFT
+  PUBLISHED
+  ARCHIVED
 }
