@@ -52,14 +52,42 @@ async function copyData(prismaSource, prismaDestination) {
         const progressBar = new cliProgress.SingleBar({}, cliProgress.Presets.shades_classic);
         progressBar.start(data.length, 0);
 
+        // Primeiro, vamos criar os tipos enum necessários
+        const enumTypes = new Set();
+        for (const column of tableSchema) {
+          if (column.data_type === 'USER-DEFINED' && column.udt_name in ENUM_VALUES) {
+            enumTypes.add(column.udt_name);
+          }
+        }
+
+        // Criar tipos enum se não existirem
+        for (const enumType of enumTypes) {
+          try {
+            const createEnumQuery = `
+              DO $$ 
+              BEGIN 
+                IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = '${enumType.toLowerCase()}') THEN
+                  CREATE TYPE "${enumType}" AS ENUM (${ENUM_VALUES[enumType].map(v => `'${v}'`).join(', ')});
+                END IF;
+              END $$;
+            `;
+            await prismaDestination.$executeRawUnsafe(createEnumQuery);
+          } catch (error) {
+            console.log(`Tipo enum ${enumType} já existe ou não pode ser criado:`, error.message);
+          }
+        }
+
         for (let index = 0; index < data.length; index++) {
           const row = data[index];
           const normalizedRow = {};
+          const columnTypes = {};
+
           const currentTimestamp = getCurrentTimestamp();
 
           for (const column of tableSchema) {
             const columnName = column.column_name;
             let value = row[columnName];
+            columnTypes[columnName] = column.data_type;
 
             // Tratamento especial para timestamps
             if (column.data_type.includes('timestamp')) {
@@ -105,14 +133,38 @@ async function copyData(prismaSource, prismaDestination) {
             normalizedRow[columnName] = value;
           }
 
-          // Usando Prisma para criar registros
+          const normalizedKeys = Object.keys(normalizedRow);
+          const normalizedValues = Object.values(normalizedRow);
+
+          // Construir placeholders com os casts apropriados
+          const placeholders = normalizedKeys.map((key, i) => {
+            const column = tableSchema.find(col => col.column_name === key);
+            if (column.data_type.includes('timestamp')) {
+              return `$${i + 1}::timestamp`;
+            } else if (column.data_type === 'USER-DEFINED') {
+              return `$${i + 1}::${column.udt_name}`;
+            } else if (column.data_type === 'ARRAY') {
+              return `$${i + 1}::${column.udt_name}[]`;
+            }
+            return `$${i + 1}`;
+          }).join(', ');
+
+          const conflictKeys = normalizedKeys.includes('id') ? 'id' : normalizedKeys[0];
+          
+          const insertQuery = `
+            INSERT INTO "${table}" (${normalizedKeys.map(key => `"${key}"`).join(', ')})
+            VALUES (${placeholders})
+            ON CONFLICT ("${conflictKeys}") DO UPDATE SET
+            ${normalizedKeys.map((key, i) => `"${key}" = EXCLUDED."${key}"`).join(', ')}
+          `;
+
           try {
-            await prismaDestination[table].create({
-              data: normalizedRow
-            });
+            await prismaDestination.$executeRawUnsafe(insertQuery, ...normalizedValues);
           } catch (error) {
             console.error(`Erro ao inserir na tabela ${table} (registro ${index + 1}/${data.length}):`, error.message);
             console.error('Dados da linha:', normalizedRow);
+            console.error('Query:', insertQuery);
+            console.error('Valores:', normalizedValues);
           }
 
           progressBar.increment();
