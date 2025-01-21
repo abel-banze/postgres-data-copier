@@ -28,18 +28,18 @@ async function getTableSchema(prisma, table) {
 
 function getDefaultValueForEnum(enumType) {
   if (!ENUM_VALUES[enumType]) return null;
-  return ENUM_VALUES[enumType][0]; // Retorna o primeiro valor do enum como padrão
+  return ENUM_VALUES[enumType][0];
 }
 
 function validateAndFixEnumValue(value, enumType) {
   if (!ENUM_VALUES[enumType]) return value;
-  
-  // Se o valor for válido, retorna ele mesmo
   if (ENUM_VALUES[enumType].includes(value)) return value;
-  
-  // Caso contrário, retorna o valor padrão
   console.warn(`Valor inválido para enum ${enumType}: ${value}. Usando valor padrão: ${ENUM_VALUES[enumType][0]}`);
   return ENUM_VALUES[enumType][0];
+}
+
+function getCurrentTimestamp() {
+  return new Date().toISOString();
 }
 
 async function copyData(prismaSource, prismaDestination) {
@@ -63,11 +63,27 @@ async function copyData(prismaSource, prismaDestination) {
           const row = data[index];
           const normalizedRow = {};
 
+          // Verificar se a tabela tem campos de timestamp
+          const hasUpdatedAt = tableSchema.some(col => col.column_name === 'updatedAt');
+          const hasCreatedAt = tableSchema.some(col => col.column_name === 'createdAt');
+          const currentTimestamp = getCurrentTimestamp();
+
           for (const column of tableSchema) {
             const columnName = column.column_name;
             let value = row[columnName];
 
-            // Tratamento especial para ENUMs
+            // Tratamento especial para updatedAt
+            if (columnName === 'updatedAt' && (value === null || value === undefined)) {
+              value = currentTimestamp;
+              console.log(`Definindo updatedAt para data atual em registro da tabela ${table}`);
+            }
+            
+            // Tratamento especial para createdAt
+            if (columnName === 'createdAt' && (value === null || value === undefined)) {
+              value = currentTimestamp;
+            }
+
+            // Tratamento para ENUMs
             if (column.data_type === 'USER-DEFINED') {
               const enumType = column.udt_name;
               if (ENUM_VALUES[enumType]) {
@@ -97,25 +113,27 @@ async function copyData(prismaSource, prismaDestination) {
                   break;
                 case 'timestamp with time zone':
                 case 'timestamp without time zone':
-                  value = new Date();
+                  value = currentTimestamp;
                   break;
               }
             }
 
-            // Normalizar nomes das colunas timestamp
-            if (columnName.toLowerCase() === 'createdat') {
-              normalizedRow['createdAt'] = value || new Date();
-            } else if (columnName.toLowerCase() === 'updateat') {
-              normalizedRow['updatedAt'] = value || new Date();
-            } else {
-              normalizedRow[columnName] = value;
-            }
+            normalizedRow[columnName] = value;
+          }
+
+          // Garantir que updatedAt tenha um valor se existir na tabela
+          if (hasUpdatedAt && !normalizedRow.updatedAt) {
+            normalizedRow.updatedAt = currentTimestamp;
+          }
+
+          // Garantir que createdAt tenha um valor se existir na tabela
+          if (hasCreatedAt && !normalizedRow.createdAt) {
+            normalizedRow.createdAt = currentTimestamp;
           }
 
           const normalizedKeys = Object.keys(normalizedRow);
           const normalizedValues = Object.values(normalizedRow);
 
-          // Criar query com cast explícito para enums
           const placeholders = normalizedKeys.map((key, i) => {
             const column = tableSchema.find(col => col.column_name === key);
             if (column && column.data_type === 'USER-DEFINED') {
