@@ -37,30 +37,36 @@ function getCurrentTimestamp() {
 
 async function copyData(prismaSource, prismaDestination) {
   try {
-    console.log("Obtendo tabelas do banco de dados de origem...");
+    console.log("Fetching tables from source database...");
     const tables = await getTables(prismaSource);
-    console.log(`Tabelas encontradas: ${tables.join(', ')}`);
+    console.log(`Tables found: ${tables.join(', ')}`);
 
     for (const table of tables) {
-      console.log(`Copiando dados da tabela: ${table}`);
+      console.log(`Processing table: ${table}`);
       
       const tableSchema = await getTableSchema(prismaSource, table);
       const data = await prismaSource.$queryRawUnsafe(`SELECT * FROM "${table}"`);
 
       if (data.length > 0) {
-        console.log(`Copiando ${data.length} registros da tabela ${table}...`);
+        console.log(`Copying ${data.length} records from ${table}...`);
         const progressBar = new cliProgress.SingleBar({}, cliProgress.Presets.shades_classic);
         progressBar.start(data.length, 0);
 
-        // Primeiro, vamos criar os tipos enum necessários
+        // Create enum types first
         const enumTypes = new Set();
+        const arrayColumns = new Map();
+
         for (const column of tableSchema) {
           if (column.data_type === 'USER-DEFINED' && column.udt_name in ENUM_VALUES) {
             enumTypes.add(column.udt_name);
           }
+          if (column.data_type === 'ARRAY') {
+            const arrayType = column.udt_name.replace(/^_/, '');
+            arrayColumns.set(column.column_name, arrayType);
+          }
         }
 
-        // Criar tipos enum se não existirem
+        // Create enum types if they don't exist
         for (const enumType of enumTypes) {
           try {
             const createEnumQuery = `
@@ -73,7 +79,7 @@ async function copyData(prismaSource, prismaDestination) {
             `;
             await prismaDestination.$executeRawUnsafe(createEnumQuery);
           } catch (error) {
-            console.log(`Tipo enum ${enumType} já existe ou não pode ser criado:`, error.message);
+            console.log(`Enum type ${enumType} already exists: ${error.message}`);
           }
         }
 
@@ -81,7 +87,6 @@ async function copyData(prismaSource, prismaDestination) {
           const row = data[index];
           const normalizedRow = {};
           const columnTypes = {};
-
           const currentTimestamp = getCurrentTimestamp();
 
           for (const column of tableSchema) {
@@ -89,7 +94,7 @@ async function copyData(prismaSource, prismaDestination) {
             let value = row[columnName];
             columnTypes[columnName] = column.data_type;
 
-            // Tratamento especial para timestamps
+            // Handle timestamps
             if (column.data_type.includes('timestamp')) {
               if (value === null || value === undefined) {
                 value = currentTimestamp;
@@ -97,36 +102,38 @@ async function copyData(prismaSource, prismaDestination) {
                 value = new Date(value);
               }
             }
-            // Tratamento para ENUMs
+            // Handle enums
             else if (column.data_type === 'USER-DEFINED') {
               const enumType = column.udt_name;
               if (ENUM_VALUES[enumType]) {
                 value = validateAndFixEnumValue(value, enumType);
               }
             }
-            // Tratamento para arrays
+            // Handle arrays
             else if (column.data_type === 'ARRAY') {
-              value = Array.isArray(value) ? value : (value ? [value] : []);
-            }
-            // Tratamento para campos não-nulos
-            else if (column.is_nullable === 'NO' && value === null) {
-              if (column.data_type === 'USER-DEFINED') {
-                const enumType = column.udt_name;
-                value = ENUM_VALUES[enumType][0];
+              if (Array.isArray(value)) {
+                // Convert array to PostgreSQL array literal
+                value = `{${value.map(v => `"${v}"`).join(',')}}`;
               } else {
-                switch (column.data_type) {
-                  case 'character varying':
-                  case 'text':
-                    value = '';
-                    break;
-                  case 'integer':
-                  case 'bigint':
-                    value = 0;
-                    break;
-                  case 'boolean':
-                    value = false;
-                    break;
-                }
+                value = '{}';
+              }
+            }
+            // Handle non-nullable fields
+            else if (column.is_nullable === 'NO' && value === null) {
+              switch (column.data_type) {
+                case 'character varying':
+                case 'text':
+                  value = '';
+                  break;
+                case 'integer':
+                case 'bigint':
+                  value = 0;
+                  break;
+                case 'boolean':
+                  value = false;
+                  break;
+                default:
+                  value = '';
               }
             }
 
@@ -136,50 +143,54 @@ async function copyData(prismaSource, prismaDestination) {
           const normalizedKeys = Object.keys(normalizedRow);
           const normalizedValues = Object.values(normalizedRow);
 
-          // Construir placeholders com os casts apropriados
+          // Build placeholders with proper casting
           const placeholders = normalizedKeys.map((key, i) => {
             const column = tableSchema.find(col => col.column_name === key);
+            
             if (column.data_type.includes('timestamp')) {
               return `$${i + 1}::timestamp`;
-            } else if (column.data_type === 'USER-DEFINED') {
-              return `$${i + 1}::${column.udt_name}`;
-            } else if (column.data_type === 'ARRAY') {
-              return `$${i + 1}::${column.udt_name}[]`;
+            }
+            if (column.data_type === 'USER-DEFINED') {
+              return `$${i + 1}::"${column.udt_name}"`;
+            }
+            if (column.data_type === 'ARRAY') {
+              const arrayType = arrayColumns.get(key);
+              return `$${i + 1}::${arrayType}[]`;
             }
             return `$${i + 1}`;
           }).join(', ');
 
-          const conflictKeys = normalizedKeys.includes('id') ? 'id' : normalizedKeys[0];
+          const conflictKey = normalizedKeys.includes('id') ? 'id' : normalizedKeys[0];
           
           const insertQuery = `
             INSERT INTO "${table}" (${normalizedKeys.map(key => `"${key}"`).join(', ')})
             VALUES (${placeholders})
-            ON CONFLICT ("${conflictKeys}") DO UPDATE SET
-            ${normalizedKeys.map((key, i) => `"${key}" = EXCLUDED."${key}"`).join(', ')}
+            ON CONFLICT ("${conflictKey}") DO UPDATE SET
+            ${normalizedKeys.map(key => `"${key}" = EXCLUDED."${key}"`).join(', ')}
           `;
 
           try {
             await prismaDestination.$executeRawUnsafe(insertQuery, ...normalizedValues);
           } catch (error) {
-            console.error(`Erro ao inserir na tabela ${table} (registro ${index + 1}/${data.length}):`, error.message);
-            console.error('Dados da linha:', normalizedRow);
-            console.error('Query:', insertQuery);
-            console.error('Valores:', normalizedValues);
+            console.error(`Error inserting into ${table} (record ${index + 1}/${data.length}):`, error.message);
+            console.error('Problematic row:', normalizedRow);
+            console.error('Generated query:', insertQuery);
+            throw error; // Stop execution on critical errors
           }
 
           progressBar.increment();
         }
 
         progressBar.stop();
-        console.log(`Tabela ${table}: ${data.length} registros processados com sucesso.`);
+        console.log(`${table}: Successfully processed ${data.length} records.`);
       } else {
-        console.log(`Tabela ${table}: sem dados para copiar.`);
+        console.log(`${table}: No data to copy.`);
       }
     }
 
-    console.log("Cópia concluída com sucesso.");
+    console.log("Data copy completed successfully.");
   } catch (error) {
-    console.error("Erro durante a cópia dos dados:", error);
+    console.error("Fatal error during data copy:", error);
     throw error;
   }
 }
