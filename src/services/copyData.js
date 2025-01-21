@@ -52,6 +52,31 @@ async function copyData(prismaSource, prismaDestination) {
         const progressBar = new cliProgress.SingleBar({}, cliProgress.Presets.shades_classic);
         progressBar.start(data.length, 0);
 
+        // Primeiro, vamos criar os tipos enum necessários
+        const enumTypes = new Set();
+        for (const column of tableSchema) {
+          if (column.data_type === 'USER-DEFINED' && column.udt_name in ENUM_VALUES) {
+            enumTypes.add(column.udt_name);
+          }
+        }
+
+        // Criar tipos enum se não existirem
+        for (const enumType of enumTypes) {
+          try {
+            const createEnumQuery = `
+              DO $$ 
+              BEGIN 
+                IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = '${enumType.toLowerCase()}') THEN
+                  CREATE TYPE "${enumType}" AS ENUM (${ENUM_VALUES[enumType].map(v => `'${v}'`).join(', ')});
+                END IF;
+              END $$;
+            `;
+            await prismaDestination.$executeRawUnsafe(createEnumQuery);
+          } catch (error) {
+            console.log(`Tipo enum ${enumType} já existe ou não pode ser criado:`, error.message);
+          }
+        }
+
         for (let index = 0; index < data.length; index++) {
           const row = data[index];
           const normalizedRow = {};
@@ -72,7 +97,6 @@ async function copyData(prismaSource, prismaDestination) {
                 value = new Date(value);
               }
             }
-            
             // Tratamento para ENUMs
             else if (column.data_type === 'USER-DEFINED') {
               const enumType = column.udt_name;
@@ -86,18 +110,23 @@ async function copyData(prismaSource, prismaDestination) {
             }
             // Tratamento para campos não-nulos
             else if (column.is_nullable === 'NO' && value === null) {
-              switch (column.data_type) {
-                case 'character varying':
-                case 'text':
-                  value = '';
-                  break;
-                case 'integer':
-                case 'bigint':
-                  value = 0;
-                  break;
-                case 'boolean':
-                  value = false;
-                  break;
+              if (column.data_type === 'USER-DEFINED') {
+                const enumType = column.udt_name;
+                value = ENUM_VALUES[enumType][0];
+              } else {
+                switch (column.data_type) {
+                  case 'character varying':
+                  case 'text':
+                    value = '';
+                    break;
+                  case 'integer':
+                  case 'bigint':
+                    value = 0;
+                    break;
+                  case 'boolean':
+                    value = false;
+                    break;
+                }
               }
             }
 
@@ -109,11 +138,13 @@ async function copyData(prismaSource, prismaDestination) {
 
           // Construir placeholders com os casts apropriados
           const placeholders = normalizedKeys.map((key, i) => {
-            const columnType = columnTypes[key];
-            if (columnType.includes('timestamp')) {
+            const column = tableSchema.find(col => col.column_name === key);
+            if (column.data_type.includes('timestamp')) {
               return `$${i + 1}::timestamp`;
-            } else if (columnType === 'USER-DEFINED') {
-              return `$${i + 1}::${tableSchema.find(col => col.column_name === key).udt_name}`;
+            } else if (column.data_type === 'USER-DEFINED') {
+              return `$${i + 1}::${column.udt_name}`;
+            } else if (column.data_type === 'ARRAY') {
+              return `$${i + 1}::${column.udt_name}[]`;
             }
             return `$${i + 1}`;
           }).join(', ');
@@ -132,6 +163,8 @@ async function copyData(prismaSource, prismaDestination) {
           } catch (error) {
             console.error(`Erro ao inserir na tabela ${table} (registro ${index + 1}/${data.length}):`, error.message);
             console.error('Dados da linha:', normalizedRow);
+            console.error('Query:', insertQuery);
+            console.error('Valores:', normalizedValues);
           }
 
           progressBar.increment();
