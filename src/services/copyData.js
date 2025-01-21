@@ -21,42 +21,36 @@ async function copyData(prismaSource, prismaDestination) {
       for (let index = 0; index < data.length; index++) {
         const row = data[index];
 
-        // Verificar se o registro já existe no banco de destino
-        const keys = Object.keys(row);
-        const values = Object.values(row);
-
-        const conditions = keys
-          .map((key, i) => `"${key}" = $${i + 1}`)
-          .join(' AND ');
-
-        const existsQuery = `SELECT 1 FROM "${table}" WHERE ${conditions} LIMIT 1`;
-        const exists = await prismaDestination.$queryRawUnsafe(existsQuery, ...values);
-
-        if (exists.length > 0) {
-          progressBar.increment(); // Atualiza a barra mesmo se pular o registro
-          continue; // Pula a inserção deste registro
-        }
-
         // Renomear colunas createdat/updateat para createdAt/updatedAt, se necessário
         const normalizedRow = {};
-        for (const key of keys) {
-          if (key === 'createdat') {
+        for (const key of Object.keys(row)) {
+          if (key.toLowerCase() === 'createdat') {
             normalizedRow['createdAt'] = row[key];
-          } else if (key === 'updateat') {
+          } else if (key.toLowerCase() === 'updateat') {
             normalizedRow['updatedAt'] = row[key];
           } else {
             normalizedRow[key] = row[key];
           }
         }
 
-        // Inserir o registro no banco de destino
+        // Preparar chaves e valores para a inserção
         const normalizedKeys = Object.keys(normalizedRow);
         const normalizedValues = Object.values(normalizedRow);
 
+        // Criação da query com `ON CONFLICT`
         const placeholders = normalizedKeys.map((_, i) => `$${i + 1}`).join(', ');
-        const insertQuery = `INSERT INTO "${table}" (${normalizedKeys.join(', ')}) VALUES (${placeholders})`;
+        const conflictKeys = normalizedKeys.includes('id') ? 'id' : normalizedKeys[0]; // Assume que a chave primária seja `id`
+        const insertQuery = `
+          INSERT INTO "${table}" (${normalizedKeys.join(', ')})
+          VALUES (${placeholders})
+          ON CONFLICT (${conflictKeys}) DO NOTHING
+        `;
 
-        await prismaDestination.$executeRawUnsafe(insertQuery, ...normalizedValues);
+        try {
+          await prismaDestination.$executeRawUnsafe(insertQuery, ...normalizedValues);
+        } catch (error) {
+          console.error(`Erro ao inserir na tabela ${table}:`, error.message);
+        }
 
         // Atualiza a barra de progresso
         progressBar.increment();
@@ -64,7 +58,7 @@ async function copyData(prismaSource, prismaDestination) {
 
       // Finaliza a barra de progresso para a tabela atual
       progressBar.stop();
-      console.log(`Tabela ${table}: ${data.length} registros copiados com sucesso.`);
+      console.log(`Tabela ${table}: ${data.length} registros processados com sucesso.`);
     } else {
       console.log(`Tabela ${table}: sem dados para copiar.`);
     }
